@@ -1,3 +1,15 @@
 *egg*
 .venv
 *pyc*
+db
+incremental_db
+*.sof
+*.rpt
+*.summary
+*.done
+*.smsg
+*.jdi
+*.pin
+*.pof
+*.sld
+
