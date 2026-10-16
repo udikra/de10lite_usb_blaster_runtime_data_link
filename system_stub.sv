@@ -5,9 +5,10 @@
 // host. JWSR 5..7 and SWJR 14..15 belong to sys_access.sv.
 //
 // System address space: a 16384 x 32-bit (64 KiB) RAM answering the sa_* bus,
-// aliased every 64 KiB (word address sa_addr[15:2]). To exercise the
-// handshake, an LFSR randomly delays sa_ready by zero or more cycles: a
-// transaction takes 2 cycles at best and about 3 on average.
+// aliased every 64 KiB (word address sa_addr[15:2]). It takes each request
+// from the cycle with sa_enable high and keeps it until served; to exercise the
+// handshake, an LFSR delays the service at random, so sa_ready comes 1 or more
+// cycles after the request (2 on average).
 module system_stub (
     input  wire              clk,
     input  wire              rst_n,
@@ -32,19 +33,35 @@ module system_stub (
 
     // The RAM is not reset, so it survives KEY[0].
     reg  [31:0] mem [0:16383];
-    wire [13:0] word = sa_addr[15:2];
-    wire        accept = sa_enable && !sa_ready && lfsr[0];
+    reg         pending;                    // a request waits for service
+    reg  [13:0] p_word;
+    reg         p_wr;
+    reg  [31:0] p_data;
+    wire [13:0] word  = sa_enable ? sa_addr[15:2] : p_word;
+    wire        wr    = sa_enable ? sa_wr       : p_wr;
+    wire [31:0] wdata = sa_enable ? sa_data_out : p_data;
+    wire        serve = (sa_enable || pending) && lfsr[0];
 
     always @(posedge clk) begin
-        if (accept) begin
-            if (sa_wr)
-                mem[word] <= sa_data_out;
+        if (sa_enable) begin
+            p_word <= sa_addr[15:2];
+            p_wr <= sa_wr;
+            p_data <= sa_data_out;
+        end
+        if (serve) begin
+            if (wr)
+                mem[word] <= wdata;
             sa_data_in <= mem[word];
         end
     end
 
     always @(posedge clk) begin
-        if (!rst_n) sa_ready <= 1'b0;
-        else        sa_ready <= accept;
+        if (!rst_n) begin
+            pending <= 1'b0;
+            sa_ready <= 1'b0;
+        end else begin
+            pending <= (sa_enable || pending) && !serve;
+            sa_ready <= serve;
+        end
     end
 endmodule

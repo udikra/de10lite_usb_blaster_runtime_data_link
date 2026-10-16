@@ -22,18 +22,22 @@
 //                      [15:8] tag of the last finished command,
 //                      [31:16] BUF_WORDS (identifies this engine)
 //
-// A command written while busy is ignored, except abort, which drops sa_enable
-// and returns to idle at once (for a system that never raises sa_ready).
+// A command written while busy is ignored, except abort, which returns to idle
+// at once (for a system that never raises sa_ready). The abandoned access may
+// still be outstanding in the system, and a late sa_ready would complete the
+// next command's first access.
 //
 // Block word k sits in buffer word k and at system address start + 4 * k.
 // A block write merges a word whose byte mask is not 4'hF into the current
 // system word (read-modify-write); mask bit n selects bits 8n+7..8n, which is
 // system byte address word + n. A one-word block uses both masks ANDed.
 //
-// sa_* bus: the engine holds sa_enable, sa_wr, sa_addr and sa_data_out stable
-// until a cycle with sa_ready high, which completes the transaction (read data
-// is taken from sa_data_in in that cycle). sa_ready is ignored while sa_enable
-// is low, and a new transaction may start in the next cycle.
+// sa_* bus: each transaction is requested by one cycle with sa_enable high,
+// and completes in the first cycle, from that one on, with sa_ready high: a
+// read takes sa_data_in in that cycle, and a write is then done. The engine
+// keeps one transaction outstanding and requests the next in the cycle after
+// sa_ready, so the system must raise sa_ready only for a request it was given.
+// sa_wr, sa_addr and sa_data_out stay stable until the transaction completes.
 //
 // The engine is the only user of the buffer's system port, and touches it only
 // while busy. The host must not scan the buffer until SA_STATUS shows the
@@ -92,7 +96,7 @@ module sys_access #(
     logic [3:0]               last_mask;
 
     wire [2:0] cmd_op = reg_cmd[2:0];
-    wire       sa_done = sa_enable && sa_ready;
+    wire       sa_done = sa_ready;           // meaningful in the bus states
     wire       last_word = idx == last;
     wire [3:0] word_mask = (idx == '0 ? first_mask : 4'hF)
                          & (last_word ? last_mask : 4'hF);
@@ -109,6 +113,7 @@ module sys_access #(
 
     always @(posedge clk) begin
         buf_en <= 1'b0;
+        sa_enable <= 1'b0;
         if (!rst_n) begin
             state <= IDLE;
             aborted <= 1'b0;
@@ -125,7 +130,6 @@ module sys_access #(
         end else if (reg_cmd_wr && cmd_op == OP_ABORT) begin
             state <= IDLE;
             aborted <= 1'b1;
-            sa_enable <= 1'b0;
             done_tag <= reg_cmd[15:8];
         end else begin
             case (state)
@@ -165,7 +169,6 @@ module sys_access #(
                 if (!sa_wr)
                     reg_rdata <= sa_data_in;
                 state <= IDLE;
-                sa_enable <= 1'b0;
                 done_tag <= tag;
             end
 
@@ -186,12 +189,12 @@ module sys_access #(
 
             BW_MERGE_RD: if (sa_done) begin
                 state <= BW_WRITE;
+                sa_enable <= 1'b1;
                 sa_wr <= 1'b1;
                 sa_data_out <= merge(sa_data_in, sa_data_out, word_mask);
             end
 
             BW_WRITE: if (sa_done) begin
-                sa_enable <= 1'b0;
                 if (last_word) begin
                     state <= IDLE;
                     done_tag <= tag;
@@ -205,8 +208,8 @@ module sys_access #(
                 end
             end
 
-            // Each word read goes into the buffer, and the next read starts
-            // in the same cycle.
+            // Each word read goes into the buffer, and the next read is
+            // requested in the next cycle.
             BR_READ: if (sa_done) begin
                 buf_en <= 1'b1;
                 buf_rd <= 1'b0;
@@ -214,11 +217,11 @@ module sys_access #(
                 buf_wdata <= sa_data_in;
                 if (last_word) begin
                     state <= IDLE;
-                    sa_enable <= 1'b0;
                     done_tag <= tag;
                 end else begin
                     idx <= idx + 1'b1;
                     sa_addr <= sa_addr + 32'd4;
+                    sa_enable <= 1'b1;
                 end
             end
 

@@ -185,14 +185,14 @@ The design's address space is reached through the `sa_*` bus driven by `sys_acce
 
 ```systemverilog
 output [31:0] sa_addr,      // address, not necessarily word aligned
-output        sa_enable,    // access request (write or read)
+output        sa_enable,    // one cycle per access request (write or read)
 output        sa_wr,        // write when 1, otherwise read
 output [31:0] sa_data_out,  // write data
 input  [31:0] sa_data_in,   // read data
-input         sa_ready      // read data valid / write data taken
+input         sa_ready      // read data valid now / write done
 ```
 
-The engine holds `sa_enable`, `sa_wr`, `sa_addr` and `sa_data_out` stable until a cycle in which `sa_ready` is high; that cycle completes the transaction and, for a read, supplies `sa_data_in`. The system may stall for any number of cycles. `sa_ready` is ignored while `sa_enable` is low, and the next transaction may start in the following cycle. Every access is one 32-bit word.
+Each transaction is requested by a single cycle with `sa_enable` high. It completes in the first cycle, from the request cycle on, in which `sa_ready` is high: a read takes `sa_data_in` in that cycle, and a write is then done. The system may take any number of cycles to answer. The engine keeps one transaction outstanding and requests the next one in the cycle after `sa_ready`, so an access takes 2 cycles when the system answers in the cycle after the request; the system must raise `sa_ready` only for a request it was given. `sa_wr`, `sa_addr` and `sa_data_out` stay stable until the transaction completes. Every access is one 32-bit word.
 
 ```python
 from regfile import data_load, data_store, sys_rd, sys_wr
@@ -216,9 +216,9 @@ Registers (JWSR 0..4 and SWJR 8..13 remain free for the design):
 | SWJR 14 | `SA_RDATA` | single read result |
 | SWJR 15 | `SA_STATUS` | `[0]` busy, `[1]` last command aborted, `[15:8]` tag of the last finished command, `[31:16]` buffer words (4096), which identifies the engine |
 
-Handshake: the host writes the operands and `SA_CMD` with a new tag, then reads `SA_STATUS` until it shows that tag with busy clear, and only then reads `SA_RDATA` or scans the buffer. A command written while the engine is busy is ignored, except abort. The driver batches these scans into one USB exchange, so a single access costs one round trip when the system answers promptly. Each block pass also starts with one exchange that puts the buffer scan before the command: a store scans its data in, then writes the command and reads the status; a load first scans out the previous pass's words, which that pass's status has already confirmed, then writes the next command. A buffer scan therefore never overlaps a command. A 4096-word block takes the stub a few hundred microseconds, so the first status read usually finds it busy and one short status poll follows. If a command does not finish within 1 s the driver aborts it, which drops `sa_enable`, and raises `UsbBlasterError`.
+Handshake: the host writes the operands and `SA_CMD` with a new tag, then reads `SA_STATUS` until it shows that tag with busy clear, and only then reads `SA_RDATA` or scans the buffer. A command written while the engine is busy is ignored, except abort. The driver batches these scans into one USB exchange, so a single access costs one round trip when the system answers promptly. Each block pass also starts with one exchange that puts the buffer scan before the command: a store scans its data in, then writes the command and reads the status; a load first scans out the previous pass's words, which that pass's status has already confirmed, then writes the next command. A buffer scan therefore never overlaps a command. A 4096-word block takes the stub a few hundred microseconds, so the first status read usually finds it busy and one short status poll follows. If a command does not finish within 1 s the driver aborts it, which returns the engine to idle (the system may still be holding the abandoned access), and raises `UsbBlasterError`.
 
-The placeholder `system_stub.sv` answers with a 16384-word RAM (aliased every 64 KiB) and holds `sa_ready` low for a random number of cycles on each access. To attach a real design, connect its bus to the `sa_*` signals in `top.sv` in place of the stub.
+The placeholder `system_stub.sv` answers with a 16384-word RAM (aliased every 64 KiB) and answers each request after a random number of cycles. To attach a real design, connect its bus to the `sa_*` signals in `top.sv` in place of the stub.
 
 ## Random Test And Demo
 
