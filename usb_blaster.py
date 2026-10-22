@@ -219,6 +219,7 @@ class UsbBlaster:
             self._ftdi_control(0x09, 2)
             self._ftdi_control(0x00, 1)
             self._ftdi_control(0x00, 2)
+            self._resync()
         except UsbBlasterError:
             self.close()
             raise
@@ -228,6 +229,27 @@ class UsbBlaster:
                 "Could not claim USB-Blaster. Confirm WinUSB is installed and no Quartus "
                 "process is using the device."
             ) from exc
+
+    def _resync(self) -> None:
+        """Bring both bulk pipes and the adapter to a known state after open.
+
+        clear_halt resets the host's data toggles but not the adapter's, so
+        when the adapter's toggle is odd (it depends on how many packets the
+        previous session or driver sent) the first packet each way is
+        acknowledged and silently dropped. Two packets of idle pin bytes
+        resync OUT, and the second one always arrives, ending any byte-shift
+        command an earlier session left pending (at most 63 bytes). The TDO
+        bytes such a command produced are purged, and one IN read takes a
+        status-only packet, which resyncs IN.
+        """
+        idle = self._bitbang_byte(0, 0, 0)
+        self._endpoint_out.write(bytes([idle]) * (2 * self._packet_size), timeout=self.timeout_ms)
+        time.sleep(0.005)
+        self._ftdi_control(0x00, 1)
+        try:
+            self._endpoint_in.read(self._packet_size, timeout=50)
+        except usb.core.USBError:
+            pass
 
     def _ftdi_control(self, request: int, value: int) -> None:
         self.device.ctrl_transfer(
